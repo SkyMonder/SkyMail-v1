@@ -152,7 +152,10 @@ def compose():
     </form>
     <p style="color:green;">{msg}</p>
     """
-    return render_template_string(layout, content=content)
+    return render_template_string(layout, content=content
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+
