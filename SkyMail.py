@@ -30,6 +30,11 @@ def save_data(data):
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
+# ---------- Главная страница ----------
+@app.route("/")
+def index():
+    return redirect(url_for("login"))
+
 # ---------- Регистрация ----------
 @app.route("/register", methods=["GET","POST"])
 def register():
@@ -199,38 +204,38 @@ REGISTER_TEMPLATE = """
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8">
-  <title>Регистрация SkyMail</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<meta charset="utf-8">
+<title>Регистрация SkyMail</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body class="bg-light">
 <div class="container mt-5">
-  <h2>Регистрация SkyMail</h2>
-  {% with messages = get_flashed_messages() %}
-    {% if messages %}
-      <div class="alert alert-info">{{ messages[0] }}</div>
-    {% endif %}
-  {% endwith %}
-  <form method="post">
-    <div class="mb-3">
-      <label>Имя пользователя</label>
-      <input class="form-control" name="username" required>
-    </div>
-    <div class="mb-3">
-      <label>Пароль</label>
-      <input class="form-control" type="password" name="password" required>
-    </div>
-    <div class="mb-3">
-      <label>Секретный вопрос</label>
-      <input class="form-control" name="secret_question" required>
-    </div>
-    <div class="mb-3">
-      <label>Ответ на секретный вопрос</label>
-      <input class="form-control" name="secret_answer" required>
-    </div>
-    <button class="btn btn-primary">Зарегистрироваться</button>
-    <a href="/login" class="btn btn-link">Вход</a>
-  </form>
+<h2>Регистрация SkyMail</h2>
+{% with messages = get_flashed_messages() %}
+{% if messages %}
+<div class="alert alert-info">{{ messages[0] }}</div>
+{% endif %}
+{% endwith %}
+<form method="post">
+<div class="mb-3">
+<label>Имя пользователя</label>
+<input class="form-control" name="username" required>
+</div>
+<div class="mb-3">
+<label>Пароль</label>
+<input class="form-control" type="password" name="password" required>
+</div>
+<div class="mb-3">
+<label>Секретный вопрос</label>
+<input class="form-control" name="secret_question" required>
+</div>
+<div class="mb-3">
+<label>Ответ на секретный вопрос</label>
+<input class="form-control" name="secret_answer" required>
+</div>
+<button class="btn btn-primary">Зарегистрироваться</button>
+<a href="/login" class="btn btn-link">Вход</a>
+</form>
 </div>
 </body>
 </html>
@@ -248,9 +253,9 @@ LOGIN_TEMPLATE = """
 <div class="container mt-5">
 <h2>Вход SkyMail</h2>
 {% with messages = get_flashed_messages() %}
-    {% if messages %}
-      <div class="alert alert-info">{{ messages[0] }}</div>
-    {% endif %}
+{% if messages %}
+<div class="alert alert-info">{{ messages[0] }}</div>
+{% endif %}
 {% endwith %}
 <form method="post">
 <div class="mb-3">
@@ -273,7 +278,9 @@ LOGIN_TEMPLATE = """
 RECOVER_TEMPLATE = """
 <!doctype html>
 <html lang="ru">
-<head><meta charset="utf-8"><title>Восстановление пароля</title>
+<head>
+<meta charset="utf-8">
+<title>Восстановление пароля</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body class="bg-light">
@@ -295,7 +302,9 @@ RECOVER_TEMPLATE = """
 RECOVER_QUESTION_TEMPLATE = """
 <!doctype html>
 <html lang="ru">
-<head><meta charset="utf-8"><title>Восстановление пароля</title>
+<head>
+<meta charset="utf-8">
+<title>Восстановление пароля</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body class="bg-light">
@@ -321,7 +330,9 @@ RECOVER_QUESTION_TEMPLATE = """
 INBOX_TEMPLATE = """
 <!doctype html>
 <html lang="ru">
-<head><meta charset="utf-8"><title>Входящие</title>
+<head>
+<meta charset="utf-8">
+<title>Входящие</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body class="bg-light">
@@ -348,7 +359,9 @@ INBOX_TEMPLATE = """
 SEND_TEMPLATE = """
 <!doctype html>
 <html lang="ru">
-<head><meta charset="utf-8"><title>Отправка письма</title>
+<head>
+<meta charset="utf-8">
+<title>Отправка письма</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body class="bg-light">
