@@ -1,186 +1,174 @@
-from flask import Flask, request, redirect, url_for, session, render_template_string
-from email_validator import validate_email, EmailNotValidError
-import smtplib, imaplib, email
+from flask import Flask, render_template_string, request, redirect, session, url_for
+import hashlib
+import json
+import os
 
 app = Flask(__name__)
-app.secret_key = "supersecretkey"
+app.secret_key = 'supersecretkey'  # На проде поменяй на случайный
 
-# База пользователей (email -> password)
-users = {}
+FILENAME = "skymail_data.json"
 
-def current_user():
-    return session.get("user")
+# Работа с данными
+def load_data():
+    if os.path.exists(FILENAME):
+        with open(FILENAME, "r") as f:
+            return json.load(f)
+    return {}
 
-layout = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>SkyMail</title>
-    <style>
-        body { font-family: Arial, sans-serif; padding: 20px; }
-        header h1 { display: inline; }
-        nav a { margin: 0 10px; text-decoration: none; }
-        .content { margin-top: 20px; }
-        .error { color: red; }
-        .success { color: green; }
-        input, textarea { margin-bottom: 10px; width: 300px; }
-    </style>
-</head>
-<body>
-<header>
-    <h1>SkyMail</h1>
-    <nav>
-        {% if user %}
-            <a href="{{ url_for('inbox') }}">Inbox</a>
-            <a href="{{ url_for('compose') }}">Compose</a>
-            <a href="{{ url_for('logout') }}">Logout</a>
-        {% else %}
-            <a href="{{ url_for('login') }}">Login</a>
-            <a href="{{ url_for('register') }}">Register</a>
-        {% endif %}
-    </nav>
-</header>
-<hr>
-<div class="content">
-{% block content %}{% endblock %}
-</div>
-</body>
-</html>
-"""
+def save_data(data):
+    with open(FILENAME, "w") as f:
+        json.dump(data, f, indent=4)
 
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+# Главная
 @app.route("/")
 def index():
-    if current_user():
+    if "email" in session:
         return redirect(url_for("inbox"))
-    return redirect(url_for("login"))
+    return render_template_string("""
+    <h1>SkyMail</h1>
+    <a href="/register">Регистрация</a> | <a href="/login">Вход</a> | <a href="/recover">Восстановление пароля</a>
+    """)
 
+# Регистрация
 @app.route("/register", methods=["GET", "POST"])
 def register():
-    error = ""
     if request.method == "POST":
-        email_addr = request.form.get("email")
-        password = request.form.get("password")
-        confirm = request.form.get("confirm")
-        if password != confirm:
-            error = "Passwords do not match"
-        else:
-            try:
-                validate_email(email_addr)
-            except EmailNotValidError as e:
-                error = str(e)
-            else:
-                if email_addr in users:
-                    error = "User already exists"
-                else:
-                    users[email_addr] = password
-                    session["user"] = email_addr
-                    return redirect(url_for("inbox"))
-    return render_template_string(layout + """
-{% block content %}
-<h2>Register</h2>
-<p class="error">{{ error }}</p>
-<form method="post">
-    <label>Email:</label><input type="email" name="email" required><br>
-    <label>Password:</label><input type="password" name="password" required><br>
-    <label>Confirm Password:</label><input type="password" name="confirm" required><br>
-    <input type="submit" value="Register">
-</form>
-{% endblock %}
-""", error=error, user=current_user())
+        data = load_data()
+        username = request.form["username"].strip()
+        email = f"{username}@skymail.ru"
+        if email in data:
+            return "Такой пользователь уже существует!"
+        password = request.form["password"]
+        secret_question = request.form["secret_question"]
+        secret_answer = request.form["secret_answer"]
+        data[email] = {
+            "password": hash_password(password),
+            "secret_question": secret_question,
+            "secret_answer": hash_password(secret_answer),
+            "inbox": []
+        }
+        save_data(data)
+        return redirect(url_for("login"))
+    return render_template_string("""
+    <h1>Регистрация</h1>
+    <form method="post">
+        Имя пользователя: <input name="username"><br>
+        Пароль: <input type="password" name="password"><br>
+        Секретный вопрос: <input name="secret_question"><br>
+        Ответ на секретный вопрос: <input name="secret_answer"><br>
+        <input type="submit" value="Зарегистрироваться">
+    </form>
+    """)
 
+# Вход
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    error = ""
     if request.method == "POST":
-        email_addr = request.form.get("email")
-        password = request.form.get("password")
-        if users.get(email_addr) == password:
-            session["user"] = email_addr
+        data = load_data()
+        email = request.form["email"]
+        password = request.form["password"]
+        if email in data and data[email]["password"] == hash_password(password):
+            session["email"] = email
             return redirect(url_for("inbox"))
-        else:
-            error = "Invalid credentials"
-    return render_template_string(layout + """
-{% block content %}
-<h2>Login</h2>
-<p class="error">{{ error }}</p>
-<form method="post">
-    <label>Email:</label><input type="email" name="email" required><br>
-    <label>Password:</label><input type="password" name="password" required><br>
-    <input type="submit" value="Login">
-</form>
-{% endblock %}
-""", error=error, user=current_user())
+        return "Неверный email или пароль!"
+    return render_template_string("""
+    <h1>Вход</h1>
+    <form method="post">
+        Email: <input name="email"><br>
+        Пароль: <input type="password" name="password"><br>
+        <input type="submit" value="Войти">
+    </form>
+    """)
+
+# Восстановление пароля
+@app.route("/recover", methods=["GET", "POST"])
+def recover():
+    if request.method == "POST":
+        data = load_data()
+        email = request.form["email"]
+        if email not in data:
+            return "Такого пользователя не существует."
+        if "answer" in request.form:
+            answer = request.form["answer"]
+            if data[email]["secret_answer"] == hash_password(answer):
+                new_password = request.form["new_password"]
+                data[email]["password"] = hash_password(new_password)
+                save_data(data)
+                return redirect(url_for("login"))
+            return "Неверный ответ!"
+        question = data[email]["secret_question"]
+        return render_template_string("""
+        <h1>Ответьте на секретный вопрос</h1>
+        <form method="post">
+            <input type="hidden" name="email" value="{{email}}">
+            Вопрос: {{question}}<br>
+            Ответ: <input name="answer"><br>
+            Новый пароль: <input name="new_password"><br>
+            <input type="submit" value="Сменить пароль">
+        </form>
+        """, email=email, question=question)
+    return render_template_string("""
+    <h1>Восстановление пароля</h1>
+    <form method="post">
+        Email: <input name="email"><br>
+        <input type="submit" value="Далее">
+    </form>
+    """)
+
+# Входящие
+@app.route("/inbox")
+def inbox():
+    if "email" not in session:
+        return redirect(url_for("login"))
+    data = load_data()
+    inbox = data[session["email"]]["inbox"]
+    return render_template_string("""
+    <h1>Входящие для {{email}}</h1>
+    <a href="/send">Отправить письмо</a> | <a href="/logout">Выйти</a>
+    <ul>
+    {% for msg in inbox %}
+        <li><b>От:</b> {{msg.from}} | <b>Тема:</b> {{msg.subject}}<br>{{msg.body}}</li>
+    {% else %}
+        <li>Входящие пусты.</li>
+    {% endfor %}
+    </ul>
+    """, email=session["email"], inbox=inbox)
+
+# Отправка письма
+@app.route("/send", methods=["GET", "POST"])
+def send():
+    if "email" not in session:
+        return redirect(url_for("login"))
+    if request.method == "POST":
+        data = load_data()
+        recipient = request.form["recipient"]
+        if recipient not in data:
+            return "Пользователь не найден."
+        message = {
+            "from": session["email"],
+            "subject": request.form["subject"],
+            "body": request.form["body"]
+        }
+        data[recipient]["inbox"].append(message)
+        save_data(data)
+        return redirect(url_for("inbox"))
+    return render_template_string("""
+    <h1>Отправка письма</h1>
+    <form method="post">
+        Кому: <input name="recipient"><br>
+        Тема: <input name="subject"><br>
+        Сообщение: <textarea name="body"></textarea><br>
+        <input type="submit" value="Отправить">
+    </form>
+    """)
 
 @app.route("/logout")
 def logout():
-    session.pop("user", None)
-    return redirect(url_for("login"))
-
-@app.route("/compose", methods=["GET", "POST"])
-def compose():
-    if not current_user():
-        return redirect(url_for("login"))
-    error = ""
-    success = ""
-    if request.method == "POST":
-        to_addr = request.form.get("to")
-        subject = request.form.get("subject")
-        body = request.form.get("body")
-        try:
-            validate_email(to_addr)
-            smtp = smtplib.SMTP_SSL("smtp.yandex.com", 465)
-            smtp.login(current_user(), users[current_user()])
-            message = f"Subject: {subject}\n\n{body}"
-            smtp.sendmail(current_user(), to_addr, message)
-            smtp.quit()
-            success = "Email sent successfully!"
-        except Exception as e:
-            error = str(e)
-    return render_template_string(layout + """
-{% block content %}
-<h2>Compose Email</h2>
-<p class="success">{{ success }}</p>
-<p class="error">{{ error }}</p>
-<form method="post">
-    <label>To:</label><input type="email" name="to" required><br>
-    <label>Subject:</label><input type="text" name="subject" required><br>
-    <label>Body:</label><br>
-    <textarea name="body" rows="5" cols="50" required></textarea><br>
-    <input type="submit" value="Send">
-</form>
-{% endblock %}
-""", error=error, success=success, user=current_user())
-
-@app.route("/inbox")
-def inbox():
-    if not current_user():
-        return redirect(url_for("login"))
-    emails_list = []
-    try:
-        imap = imaplib.IMAP4_SSL("imap.yandex.com")
-        imap.login(current_user(), users[current_user()])
-        imap.select("INBOX")
-        status, data = imap.search(None, "ALL")
-        for num in data[0].split():
-            status, msg_data = imap.fetch(num, "(RFC822)")
-            msg = email.message_from_bytes(msg_data[0][1])
-            emails_list.append({
-                "from": msg["From"],
-                "subject": msg["Subject"]
-            })
-        imap.logout()
-    except Exception as e:
-        emails_list.append({"from":"Error", "subject": str(e)})
-    return render_template_string(layout + """
-{% block content %}
-<h2>Inbox</h2>
-<ul>
-    {% for email in emails %}
-        <li><strong>From:</strong> {{ email.from }} | <strong>Subject:</strong> {{ email.subject }}</li>
-    {% endfor %}
-</ul>
-{% endblock %}
-""", emails=emails_list, user=current_user())
+    session.pop("email", None)
+    return redirect(url_for("index"))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
