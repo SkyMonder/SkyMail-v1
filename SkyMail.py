@@ -1,39 +1,52 @@
 from flask import Flask, request, redirect, url_for, session, render_template_string
 from email_validator import validate_email, EmailNotValidError
-import smtplib
-import imaplib
-import email
+import smtplib, imaplib, email
 
 app = Flask(__name__)
 app.secret_key = "supersecretkey"
 
-# Простая база пользователей (email -> password)
+# База пользователей (email -> password)
 users = {}
 
-# Базовый шаблон без блоков
+def current_user():
+    return session.get("user")
+
 layout = """
 <!DOCTYPE html>
 <html>
 <head>
     <title>SkyMail</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        header h1 { display: inline; }
+        nav a { margin: 0 10px; text-decoration: none; }
+        .content { margin-top: 20px; }
+        .error { color: red; }
+        .success { color: green; }
+        input, textarea { margin-bottom: 10px; width: 300px; }
+    </style>
 </head>
 <body>
+<header>
     <h1>SkyMail</h1>
-    {% if user %}
-        <p>Logged in as {{ user }}</p>
-        <p><a href="{{ url_for('logout') }}">Logout</a> | <a href="{{ url_for('inbox') }}">Inbox</a> | <a href="{{ url_for('compose') }}">Compose</a></p>
-    {% else %}
-        <p><a href="{{ url_for('login') }}">Login</a> | <a href="{{ url_for('register') }}">Register</a></p>
-    {% endif %}
-    <hr>
-    {{ content|safe }}
+    <nav>
+        {% if user %}
+            <a href="{{ url_for('inbox') }}">Inbox</a>
+            <a href="{{ url_for('compose') }}">Compose</a>
+            <a href="{{ url_for('logout') }}">Logout</a>
+        {% else %}
+            <a href="{{ url_for('login') }}">Login</a>
+            <a href="{{ url_for('register') }}">Register</a>
+        {% endif %}
+    </nav>
+</header>
+<hr>
+<div class="content">
+{% block content %}{% endblock %}
+</div>
 </body>
 </html>
 """
-
-# Получение текущего пользователя
-def current_user():
-    return session.get("user")
 
 @app.route("/")
 def index():
@@ -47,28 +60,33 @@ def register():
     if request.method == "POST":
         email_addr = request.form.get("email")
         password = request.form.get("password")
-        try:
-            validate_email(email_addr)
-        except EmailNotValidError as e:
-            error = str(e)
+        confirm = request.form.get("confirm")
+        if password != confirm:
+            error = "Passwords do not match"
         else:
-            if email_addr in users:
-                error = "User already exists"
+            try:
+                validate_email(email_addr)
+            except EmailNotValidError as e:
+                error = str(e)
             else:
-                users[email_addr] = password
-                session["user"] = email_addr
-                return redirect(url_for("inbox"))
-
-    form = f"""
-    <h2>Register</h2>
-    <p style="color:red">{error}</p>
-    <form method="post">
-        Email: <input type="text" name="email"><br>
-        Password: <input type="password" name="password"><br>
-        <input type="submit" value="Register">
-    </form>
-    """
-    return render_template_string(layout, content=form, user=current_user())
+                if email_addr in users:
+                    error = "User already exists"
+                else:
+                    users[email_addr] = password
+                    session["user"] = email_addr
+                    return redirect(url_for("inbox"))
+    return render_template_string(layout + """
+{% block content %}
+<h2>Register</h2>
+<p class="error">{{ error }}</p>
+<form method="post">
+    <label>Email:</label><input type="email" name="email" required><br>
+    <label>Password:</label><input type="password" name="password" required><br>
+    <label>Confirm Password:</label><input type="password" name="confirm" required><br>
+    <input type="submit" value="Register">
+</form>
+{% endblock %}
+""", error=error, user=current_user())
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -81,17 +99,17 @@ def login():
             return redirect(url_for("inbox"))
         else:
             error = "Invalid credentials"
-
-    form = f"""
-    <h2>Login</h2>
-    <p style="color:red">{error}</p>
-    <form method="post">
-        Email: <input type="text" name="email"><br>
-        Password: <input type="password" name="password"><br>
-        <input type="submit" value="Login">
-    </form>
-    """
-    return render_template_string(layout, content=form, user=current_user())
+    return render_template_string(layout + """
+{% block content %}
+<h2>Login</h2>
+<p class="error">{{ error }}</p>
+<form method="post">
+    <label>Email:</label><input type="email" name="email" required><br>
+    <label>Password:</label><input type="password" name="password" required><br>
+    <input type="submit" value="Login">
+</form>
+{% endblock %}
+""", error=error, user=current_user())
 
 @app.route("/logout")
 def logout():
@@ -102,7 +120,6 @@ def logout():
 def compose():
     if not current_user():
         return redirect(url_for("login"))
-
     error = ""
     success = ""
     if request.method == "POST":
@@ -111,7 +128,6 @@ def compose():
         body = request.form.get("body")
         try:
             validate_email(to_addr)
-            # Настройки для Yandex
             smtp = smtplib.SMTP_SSL("smtp.yandex.com", 465)
             smtp.login(current_user(), users[current_user()])
             message = f"Subject: {subject}\n\n{body}"
@@ -120,26 +136,26 @@ def compose():
             success = "Email sent successfully!"
         except Exception as e:
             error = str(e)
-
-    form = f"""
-    <h2>Compose</h2>
-    <p style="color:green">{success}</p>
-    <p style="color:red">{error}</p>
-    <form method="post">
-        To: <input type="text" name="to"><br>
-        Subject: <input type="text" name="subject"><br>
-        Body:<br><textarea name="body" rows="5" cols="40"></textarea><br>
-        <input type="submit" value="Send">
-    </form>
-    """
-    return render_template_string(layout, content=form, user=current_user())
+    return render_template_string(layout + """
+{% block content %}
+<h2>Compose Email</h2>
+<p class="success">{{ success }}</p>
+<p class="error">{{ error }}</p>
+<form method="post">
+    <label>To:</label><input type="email" name="to" required><br>
+    <label>Subject:</label><input type="text" name="subject" required><br>
+    <label>Body:</label><br>
+    <textarea name="body" rows="5" cols="50" required></textarea><br>
+    <input type="submit" value="Send">
+</form>
+{% endblock %}
+""", error=error, success=success, user=current_user())
 
 @app.route("/inbox")
 def inbox():
     if not current_user():
         return redirect(url_for("login"))
-
-    emails = []
+    emails_list = []
     try:
         imap = imaplib.IMAP4_SSL("imap.yandex.com")
         imap.login(current_user(), users[current_user()])
@@ -148,13 +164,23 @@ def inbox():
         for num in data[0].split():
             status, msg_data = imap.fetch(num, "(RFC822)")
             msg = email.message_from_bytes(msg_data[0][1])
-            emails.append(f"From: {msg['From']} | Subject: {msg['Subject']}")
+            emails_list.append({
+                "from": msg["From"],
+                "subject": msg["Subject"]
+            })
         imap.logout()
     except Exception as e:
-        emails.append(f"Error fetching emails: {str(e)}")
-
-    inbox_html = "<h2>Inbox</h2>" + "<br>".join(emails)
-    return render_template_string(layout, content=inbox_html, user=current_user())
+        emails_list.append({"from":"Error", "subject": str(e)})
+    return render_template_string(layout + """
+{% block content %}
+<h2>Inbox</h2>
+<ul>
+    {% for email in emails %}
+        <li><strong>From:</strong> {{ email.from }} | <strong>Subject:</strong> {{ email.subject }}</li>
+    {% endfor %}
+</ul>
+{% endblock %}
+""", emails=emails_list, user=current_user())
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
