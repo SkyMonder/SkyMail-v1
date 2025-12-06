@@ -30,8 +30,8 @@ def allowed_file(filename):
 # ================== SMTP ==================
 SMTP_SERVER = "smtp.gmail.com"  # или smtp.mail.ru
 SMTP_PORT = 465
-SMTP_USER = "your_email@gmail.com"  # ваш email
-SMTP_PASS = "your_app_password"     # пароль приложения Gmail
+SMTP_USER = "skymonder@yandex.ru"  # ваш email
+SMTP_PASS = "harapjyzlsnsnugo"     # пароль приложения Gmail
 
 def send_external_email(to_email, subject, body, attachments=[]):
     try:
@@ -252,3 +252,4 @@ def logout():
 if __name__=="__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
+
