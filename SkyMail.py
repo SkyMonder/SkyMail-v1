@@ -1,392 +1,224 @@
-from flask import Flask, render_template_string, request, redirect, session, url_for, flash
-import hashlib
-import json
-import os
-import imaplib
-import email
-import smtplib
-from email.mime.text import MIMEText
-import threading
-import time
+from flask import Flask, request, redirect, url_for, flash, session, send_from_directory, render_template_string
+import os, json, hashlib, shutil, re
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = 'supersecretkey'  # На проде поменять на случайный
+app.secret_key = "supersecretkey"
 
-FILENAME = "skymail_data.json"
+DATA_FILE = "skymail_data.json"
+FILES_DIR = "files"
+ALLOWED_EXTENSIONS = {"txt", "pdf", "png", "jpg", "jpeg", "gif"}
+os.makedirs(FILES_DIR, exist_ok=True)
 
-# ---------- Внешний почтовый мост ----------
-EXTERNAL_EMAIL = "skymonder@yandex.ru"
-EXTERNAL_PASSWORD = "ПарольПриложения"
+# ================== Данные ==================
+if not os.path.exists(DATA_FILE):
+    with open(DATA_FILE,"w") as f:
+        json.dump({"users":{},"messages":[]},f)
 
-# ---------- Работа с данными ----------
 def load_data():
-    if os.path.exists(FILENAME):
-        with open(FILENAME, "r") as f:
-            return json.load(f)
-    return {}
-
+    with open(DATA_FILE,"r") as f:
+        return json.load(f)
 def save_data(data):
-    with open(FILENAME, "w") as f:
-        json.dump(data, f, indent=4)
+    with open(DATA_FILE,"w") as f:
+        json.dump(data,f,indent=4)
+def hash_password(p):
+    return hashlib.sha256(p.encode()).hexdigest()
+def allowed_file(filename):
+    return "." in filename and filename.rsplit(".",1)[1].lower() in ALLOWED_EXTENSIONS
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
-# ---------- Главная страница ----------
-@app.route("/")
-def index():
-    return redirect(url_for("login"))
-
-# ---------- Регистрация ----------
-@app.route("/register", methods=["GET","POST"])
-def register():
-    if request.method == "POST":
-        data = load_data()
-        username = request.form["username"].strip()
-        email_addr = f"{username}@skymail.ru"
-        if email_addr in data:
-            flash("Такой пользователь уже существует!")
-            return redirect(url_for("register"))
-        password = request.form["password"]
-        secret_question = request.form["secret_question"]
-        secret_answer = request.form["secret_answer"]
-        data[email_addr] = {
-            "password": hash_password(password),
-            "secret_question": secret_question,
-            "secret_answer": hash_password(secret_answer),
-            "inbox": []
-        }
-        save_data(data)
-        flash(f"Аккаунт {email_addr} успешно создан!")
-        return redirect(url_for("login"))
-    return render_template_string(REGISTER_TEMPLATE)
-
-# ---------- Вход ----------
-@app.route("/login", methods=["GET","POST"])
-def login():
-    if request.method == "POST":
-        data = load_data()
-        email_addr = request.form["email"]
-        password = request.form["password"]
-        if email_addr in data and data[email_addr]["password"] == hash_password(password):
-            session["email"] = email_addr
-            flash(f"Добро пожаловать, {email_addr}!")
-            return redirect(url_for("inbox"))
-        flash("Неверный email или пароль!")
-        return redirect(url_for("login"))
-    return render_template_string(LOGIN_TEMPLATE)
-
-# ---------- Восстановление пароля ----------
-@app.route("/recover", methods=["GET","POST"])
-def recover():
-    data = load_data()
-    if request.method == "POST":
-        email_addr = request.form["email"]
-        if email_addr not in data:
-            flash("Такого пользователя не существует!")
-            return redirect(url_for("recover"))
-        if "answer" in request.form:
-            answer = request.form["answer"]
-            if data[email_addr]["secret_answer"] == hash_password(answer):
-                new_password = request.form["new_password"]
-                data[email_addr]["password"] = hash_password(new_password)
-                save_data(data)
-                flash("Пароль успешно изменён!")
-                return redirect(url_for("login"))
-            else:
-                flash("Неверный ответ на секретный вопрос!")
-                return redirect(url_for("recover"))
-        question = data[email_addr]["secret_question"]
-        return render_template_string(RECOVER_QUESTION_TEMPLATE, email=email_addr, question=question)
-    return render_template_string(RECOVER_TEMPLATE)
-
-# ---------- Выход ----------
-@app.route("/logout")
-def logout():
-    session.pop("email", None)
-    flash("Вы вышли из системы.")
-    return redirect(url_for("login"))
-
-# ---------- Входящие ----------
-@app.route("/inbox")
-def inbox():
-    if "email" not in session:
-        return redirect(url_for("login"))
-    data = load_data()
-    inbox = data[session["email"]]["inbox"]
-    return render_template_string(INBOX_TEMPLATE, inbox=inbox, email=session["email"])
-
-# ---------- Отправка письма ----------
-@app.route("/send", methods=["GET","POST"])
-def send():
-    if "email" not in session:
-        return redirect(url_for("login"))
-    if request.method == "POST":
-        data = load_data()
-        recipient = request.form["recipient"].strip()
-        subject = request.form["subject"]
-        body = request.form["body"]
-        status_msg = ""
-        # Отправка внутреннему пользователю SkyMail
-        if recipient in data:
-            message = {"from": session["email"], "subject": subject, "body": body}
-            data[recipient]["inbox"].append(message)
-            status_msg += "Внутренний получатель: успешно. "
-        # Отправка внешнему email через Yandex SMTP
-        try:
-            send_external_email(recipient, subject, body)
-            status_msg += "Внешний получатель: успешно."
-        except Exception as e:
-            status_msg += f"Ошибка отправки внешнему получателю: {e}"
-        save_data(data)
-        flash(status_msg)
-        return redirect(url_for("inbox"))
-    return render_template_string(SEND_TEMPLATE)
-
-# ---------- Функция получения писем с внешнего ящика ----------
-def fetch_external_emails():
-    data = load_data()
-    try:
-        imap = imaplib.IMAP4_SSL("imap.yandex.ru")
-        imap.login(EXTERNAL_EMAIL, EXTERNAL_PASSWORD)
-        imap.select("INBOX")
-        status, messages = imap.search(None, 'ALL')  # берём все письма
-        for num in messages[0].split():
-            status, msg_data = imap.fetch(num, "(RFC822)")
-            raw_email = msg_data[0][1]
-            msg = email.message_from_bytes(raw_email)
-
-            recipient = msg.get("To")
-            if recipient not in data:
-                continue
-
-            sender = msg.get("From")
-            subject = msg.get("Subject", "")
-            body = ""
-            if msg.is_multipart():
-                for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
-                        body = part.get_payload(decode=True).decode()
-                        break
-            else:
-                body = msg.get_payload(decode=True).decode()
-
-            message = {"from": sender, "subject": subject, "body": body}
-            data[recipient]["inbox"].append(message)
-        save_data(data)
-        imap.logout()
-    except Exception as e:
-        print("Ошибка при получении писем:", e)
-
-# ---------- Функция отправки через внешний SMTP ----------
-def send_external_email(to, subject, body):
-    smtp = smtplib.SMTP_SSL("smtp.yandex.ru", 465)
-    smtp.login(EXTERNAL_EMAIL, EXTERNAL_PASSWORD)
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = EXTERNAL_EMAIL
-    msg["To"] = to
-    smtp.sendmail(EXTERNAL_EMAIL, to, msg.as_string())
-    smtp.quit()
-
-# ---------- Фоновый поток проверки внешней почты ----------
-def email_fetcher_thread():
-    while True:
-        fetch_external_emails()
-        time.sleep(60)  # каждые 60 секунд
-
-threading.Thread(target=email_fetcher_thread, daemon=True).start()
-
-# ==================== Шаблоны ====================
-
-REGISTER_TEMPLATE = """
-<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<title>Регистрация SkyMail</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body class="bg-light">
-<div class="container mt-5">
-<h2>Регистрация SkyMail</h2>
-{% with messages = get_flashed_messages() %}
-{% if messages %}
-<div class="alert alert-info">{{ messages[0] }}</div>
-{% endif %}
+# ================== HTML-шаблоны ==================
+login_html = """
+<h2>SkyMail - Вход</h2>
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+    <p style="color:{% if category=='error' %}red{% else %}green{% endif %}">{{ message }}</p>
+  {% endfor %}
 {% endwith %}
 <form method="post">
-<div class="mb-3">
-<label>Имя пользователя</label>
-<input class="form-control" name="username" required>
-</div>
-<div class="mb-3">
-<label>Пароль</label>
-<input class="form-control" type="password" name="password" required>
-</div>
-<div class="mb-3">
-<label>Секретный вопрос</label>
-<input class="form-control" name="secret_question" required>
-</div>
-<div class="mb-3">
-<label>Ответ на секретный вопрос</label>
-<input class="form-control" name="secret_answer" required>
-</div>
-<button class="btn btn-primary">Зарегистрироваться</button>
-<a href="/login" class="btn btn-link">Вход</a>
+Email: <input type="text" name="email"><br>
+Пароль: <input type="password" name="password"><br>
+<input type="submit" value="Войти">
 </form>
-</div>
-</body>
-</html>
+<p><a href="{{ url_for('register') }}">Регистрация</a> | <a href="{{ url_for('recover') }}">Восстановление пароля</a></p>
 """
 
-LOGIN_TEMPLATE = """
-<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<title>Вход SkyMail</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body class="bg-light">
-<div class="container mt-5">
-<h2>Вход SkyMail</h2>
-{% with messages = get_flashed_messages() %}
-{% if messages %}
-<div class="alert alert-info">{{ messages[0] }}</div>
-{% endif %}
-{% endwith %}
+register_html = """
+<h2>SkyMail - Регистрация</h2>
 <form method="post">
-<div class="mb-3">
-<label>Email</label>
-<input class="form-control" name="email" required>
-</div>
-<div class="mb-3">
-<label>Пароль</label>
-<input class="form-control" type="password" name="password" required>
-</div>
-<button class="btn btn-primary">Войти</button>
-<a href="/register" class="btn btn-link">Регистрация</a>
-<a href="/recover" class="btn btn-link">Восстановить пароль</a>
+Логин (без @skymail.ru): <input type="text" name="username"><br>
+Пароль: <input type="password" name="password"><br>
+Секретный вопрос (для восстановления): <input type="text" name="secret"><br>
+<input type="submit" value="Зарегистрироваться">
 </form>
-</div>
-</body>
-</html>
+<p><a href="{{ url_for('login') }}">Вход</a></p>
 """
 
-RECOVER_TEMPLATE = """
-<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<title>Восстановление пароля</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body class="bg-light">
-<div class="container mt-5">
+recover_html = """
 <h2>Восстановление пароля</h2>
 <form method="post">
-<div class="mb-3">
-<label>Email</label>
-<input class="form-control" name="email" required>
-</div>
-<button class="btn btn-primary">Далее</button>
+Email: <input type="text" name="email"><br>
+Секретный ответ: <input type="text" name="secret"><br>
+Новый пароль: <input type="password" name="new_password"><br>
+<input type="submit" value="Сбросить пароль">
 </form>
-<a href="/login" class="btn btn-link">Вход</a>
-</div>
-</body>
-</html>
+<p><a href="{{ url_for('login') }}">Вход</a></p>
 """
 
-RECOVER_QUESTION_TEMPLATE = """
-<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<title>Восстановление пароля</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body class="bg-light">
-<div class="container mt-5">
-<h2>Ответ на секретный вопрос</h2>
-<form method="post">
-<input type="hidden" name="email" value="{{email}}">
-<div class="mb-3">
-<label>Вопрос: {{question}}</label>
-<input class="form-control" name="answer" required>
-</div>
-<div class="mb-3">
-<label>Новый пароль</label>
-<input class="form-control" type="password" name="new_password" required>
-</div>
-<button class="btn btn-primary">Сменить пароль</button>
-</form>
-</div>
-</body>
-</html>
-"""
-
-INBOX_TEMPLATE = """
-<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<title>Входящие</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body class="bg-light">
-<div class="container mt-5">
-<h2>Входящие: {{email}}</h2>
-<a href="/send" class="btn btn-success mb-3">Отправить письмо</a>
-<a href="/logout" class="btn btn-secondary mb-3">Выйти</a>
-<ul class="list-group">
-{% for msg in inbox %}
-<li class="list-group-item">
-<b>От:</b> {{msg.from}} <br>
-<b>Тема:</b> {{msg.subject}} <br>
-<b>Текст:</b> {{msg.body}}
-</li>
-{% else %}
-<li class="list-group-item">Входящие пусты.</li>
+inbox_html = """
+<h2>SkyMail - Входящие ({{ user }})</h2>
+<p><a href="{{ url_for('send') }}">Написать сообщение</a> | <a href="{{ url_for('process_bridge') }}">Обработать мост</a> | <a href="{{ url_for('logout') }}">Выход</a></p>
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category,message in messages %}
+    <p style="color:{% if category=='error' %}red{% else %}green{% endif %}">{{ message }}</p>
+  {% endfor %}
+{% endwith %}
+{% for i,msg in enumerate(messages_list,1) %}
+<hr>
+<p><b>{{i}}. От:</b> {{msg['from']}} | <b>Тема:</b> {{msg['subject']}}</p>
+<p>{{msg['body']}}</p>
+{% if msg.get('files') %}
+<p>Файлы: 
+{% for f in msg['files'] %}
+<a href="{{ url_for('uploaded_file', filename=f) }}">{{ f }}</a>
 {% endfor %}
-</ul>
-</div>
-</body>
-</html>
+</p>
+{% endif %}
+{% endfor %}
 """
 
-SEND_TEMPLATE = """
-<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<title>Отправка письма</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body class="bg-light">
-<div class="container mt-5">
-<h2>Отправка письма</h2>
-<form method="post">
-<div class="mb-3">
-<label>Кому (email получателя)</label>
-<input class="form-control" name="recipient" required>
-</div>
-<div class="mb-3">
-<label>Тема</label>
-<input class="form-control" name="subject" required>
-</div>
-<div class="mb-3">
-<label>Сообщение</label>
-<textarea class="form-control" name="body" rows="5" required></textarea>
-</div>
-<button class="btn btn-primary">Отправить</button>
-<a href="/inbox" class="btn btn-link">Входящие</a>
+send_html = """
+<h2>Написать сообщение</h2>
+<form method="post" enctype="multipart/form-data">
+Получатель: <input type="text" name="recipient"><br>
+Тема: <input type="text" name="subject"><br>
+Сообщение:<br><textarea name="body" rows="5" cols="50"></textarea><br>
+Прикрепить файлы: <input type="file" name="files" multiple><br>
+<input type="submit" value="Отправить">
 </form>
-</div>
-</body>
-</html>
+<p><a href="{{ url_for('inbox') }}">Назад в входящие</a></p>
 """
 
-# ---------- Запуск ----------
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+# ================== Маршруты ==================
+@app.route("/", methods=["GET","POST"])
+@app.route("/login", methods=["GET","POST"])
+def login():
+    if request.method=="POST":
+        email = request.form["email"].strip()
+        password = request.form["password"].strip()
+        data = load_data()
+        if email in data["users"] and data["users"][email]["password"]==hash_password(password):
+            session["user"]=email
+            return redirect(url_for("inbox"))
+        flash("Неверный логин или пароль!","error")
+    return render_template_string(login_html)
+
+@app.route("/register", methods=["GET","POST"])
+def register():
+    if request.method=="POST":
+        username = request.form["username"].strip()
+        password = request.form["password"].strip()
+        secret = request.form["secret"].strip()
+        email = f"{username}@skymail.ru"
+        data = load_data()
+        if email in data["users"]:
+            flash("Пользователь уже существует!","error")
+            return redirect(url_for("register"))
+        data["users"][email]={"password":hash_password(password),"secret":secret}
+        save_data(data)
+        flash("Аккаунт создан! Войдите в систему.","success")
+        return redirect(url_for("login"))
+    return render_template_string(register_html)
+
+@app.route("/recover", methods=["GET","POST"])
+def recover():
+    if request.method=="POST":
+        email = request.form["email"].strip()
+        answer = request.form["secret"].strip()
+        new_password = request.form["new_password"].strip()
+        data = load_data()
+        if email not in data["users"]:
+            flash("Пользователь не найден!","error")
+        elif data["users"][email]["secret"]!=answer:
+            flash("Неверный ответ!","error")
+        else:
+            data["users"][email]["password"]=hash_password(new_password)
+            save_data(data)
+            flash("Пароль изменён!","success")
+            return redirect(url_for("login"))
+    return render_template_string(recover_html)
+
+@app.route("/send", methods=["GET","POST"])
+def send():
+    if "user" not in session:
+        return redirect(url_for("login"))
+    if request.method=="POST":
+        sender = session["user"]
+        recipient = request.form["recipient"].strip()
+        subject = request.form["subject"].strip()
+        body = request.form["body"].strip()
+        files_list=[]
+        uploaded_files=request.files.getlist("files")
+        for file in uploaded_files:
+            if file and allowed_file(file.filename):
+                filename=secure_filename(f"{sender.replace('@','_')}_{file.filename}")
+                file.save(os.path.join(FILES_DIR,filename))
+                files_list.append(filename)
+        data=load_data()
+        if recipient.endswith("@skymail.ru") and recipient in data["users"]:
+            data["messages"].append({"from":sender,"to":recipient,"subject":subject,"body":body,"files":files_list})
+            flash("Сообщение отправлено внутреннему пользователю!","success")
+        else:
+            bridge_email="skymonder@yandex.ru"
+            bridge_message=f"Отправитель:{sender}\nКому:{recipient}\nТема:{subject}\n\n{body}"
+            data["messages"].append({"from":sender,"to":bridge_email,"subject":f"[Внешняя почта] Кому: {recipient} | {subject}","body":bridge_message,"files":files_list})
+            flash(f"Сообщение отправлено через мост для {recipient}!","success")
+        save_data(data)
+        return redirect(url_for("inbox"))
+    return render_template_string(send_html)
+
+@app.route("/inbox")
+def inbox():
+    if "user" not in session:
+        return redirect(url_for("login"))
+    data=load_data()
+    user=session["user"]
+    messages_list=[m for m in data["messages"] if m["to"]==user]
+    return render_template_string(inbox_html,messages_list=messages_list,user=user)
+
+@app.route("/process_bridge")
+def process_bridge():
+    if "user" not in session:
+        return redirect(url_for("login"))
+    data=load_data()
+    new_messages=[]
+    for msg in data["messages"]:
+        if msg["to"]=="skymonder@yandex.ru" and "[Внешняя почта]" in msg["subject"]:
+            match=re.search(r"Кому: (\S+@skymail\.ru)",msg["subject"])
+            if match:
+                recipient=match.group(1)
+                if recipient in data["users"]:
+                    data["messages"].append({"from":msg["from"],"to":recipient,"subject":msg["subject"].replace(f"Кому: {recipient} | ",""),"body":msg["body"],"files":msg.get("files",[])})
+                    flash(f"Письмо для {recipient} добавлено во входящие.","success")
+                else:
+                    flash(f"SkyMail адрес {recipient} не найден, письмо пропущено.","error")
+            else:
+                flash("В теме письма не найден SkyMail адрес.","error")
+            new_messages.append(msg)
+    for m in new_messages:
+        data["messages"].remove(m)
+    save_data(data)
+    return redirect(url_for("inbox"))
+
+@app.route("/files/<filename>")
+def uploaded_file(filename):
+    return send_from_directory(FILES_DIR,filename)
+
+@app.route("/logout")
+def logout():
+    session.pop("user",None)
+    flash("Вы вышли из системы.","success")
+    return redirect(url_for("login"))
+
+# ================== Запуск ==================
+if __name__=="__main__":
+    app.run(debug=True)
