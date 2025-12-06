@@ -1,6 +1,7 @@
 from flask import Flask, request, redirect, url_for, flash, session, send_from_directory, render_template_string
-import os, json, hashlib, re
+import os, json, hashlib, re, smtplib, threading, time
 from werkzeug.utils import secure_filename
+from email.message import EmailMessage
 
 app = Flask(__name__)
 app.secret_key = "supersecretkey"
@@ -26,7 +27,36 @@ def hash_password(p):
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".",1)[1].lower() in ALLOWED_EXTENSIONS
 
-# ================== HTML-шаблоны ==================
+# ================== SMTP ==================
+SMTP_SERVER = "smtp.gmail.com"  # Или smtp.mail.ru и т.д.
+SMTP_PORT = 465
+SMTP_USER = "your_email@gmail.com"   # Адрес отправителя
+SMTP_PASS = "your_app_password"      # Пароль приложения Gmail
+
+def send_external_email(to_email, subject, body, attachments=[]):
+    try:
+        msg = EmailMessage()
+        msg["From"] = SMTP_USER
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.set_content(body)
+
+        for fpath in attachments:
+            with open(fpath, "rb") as f:
+                data = f.read()
+                fname = os.path.basename(fpath)
+                msg.add_attachment(data, maintype="application", subtype="octet-stream", filename=fname)
+
+        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
+            smtp.login(SMTP_USER, SMTP_PASS)
+            smtp.send_message(msg)
+        print(f"[SMTP] Письмо отправлено на {to_email}")
+        return True
+    except Exception as e:
+        print(f"[SMTP] Ошибка при отправке: {e}")
+        return False
+
+# ================== HTML ==================
 login_html = """
 <h2>SkyMail - Вход</h2>
 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -66,7 +96,7 @@ Email: <input type="text" name="email"><br>
 
 inbox_html = """
 <h2>SkyMail - Входящие ({{ user }})</h2>
-<p><a href="{{ url_for('send') }}">Написать сообщение</a> | <a href="{{ url_for('process_bridge') }}">Обработать мост</a> | <a href="{{ url_for('logout') }}">Выход</a></p>
+<p><a href="{{ url_for('send') }}">Написать сообщение</a> | <a href="{{ url_for('logout') }}">Выход</a></p>
 {% with messages = get_flashed_messages(with_categories=true) %}
   {% for category,message in messages %}
     <p style="color:{% if category=='error' %}red{% else %}green{% endif %}">{{ message }}</p>
@@ -162,16 +192,18 @@ def send():
             if file and allowed_file(file.filename):
                 filename=secure_filename(f"{sender.replace('@','_')}_{file.filename}")
                 file.save(os.path.join(FILES_DIR,filename))
-                files_list.append(filename)
+                files_list.append(os.path.join(FILES_DIR,filename))
         data=load_data()
+        # Внутренний SkyMail
         if recipient.endswith("@skymail.ru") and recipient in data["users"]:
             data["messages"].append({"from":sender,"to":recipient,"subject":subject,"body":body,"files":files_list})
             flash("Сообщение отправлено внутреннему пользователю!","success")
         else:
-            bridge_email="skymonder@yandex.ru"
-            bridge_message=f"Отправитель:{sender}\nКому:{recipient}\nТема:{subject}\n\n{body}"
-            data["messages"].append({"from":sender,"to":bridge_email,"subject":f"[Внешняя почта] Кому: {recipient} | {subject}","body":bridge_message,"files":files_list})
-            flash(f"Сообщение отправлено через мост для {recipient}!","success")
+            # Отправка реальному внешнему почтовому ящику через SMTP
+            if send_external_email(recipient, subject, body, files_list):
+                flash(f"Сообщение успешно отправлено на {recipient} через SMTP!","success")
+            else:
+                flash(f"Не удалось отправить письмо на {recipient}.","error")
         save_data(data)
         return redirect(url_for("inbox"))
     return render_template_string(send_html)
@@ -185,33 +217,9 @@ def inbox():
     messages_list=[m for m in data["messages"] if m["to"]==user]
     return render_template_string(inbox_html,messages_list=messages_list,user=user)
 
-@app.route("/process_bridge")
-def process_bridge():
-    if "user" not in session:
-        return redirect(url_for("login"))
-    data=load_data()
-    new_messages=[]
-    for msg in data["messages"]:
-        if msg["to"]=="skymonder@yandex.ru" and "[Внешняя почта]" in msg["subject"]:
-            match=re.search(r"Кому: (\S+@skymail\.ru)",msg["subject"])
-            if match:
-                recipient=match.group(1)
-                if recipient in data["users"]:
-                    data["messages"].append({"from":msg["from"],"to":recipient,"subject":msg["subject"].replace(f"Кому: {recipient} | ",""),"body":msg["body"],"files":msg.get("files",[])})
-                    flash(f"Письмо для {recipient} добавлено во входящие.","success")
-                else:
-                    flash(f"SkyMail адрес {recipient} не найден, письмо пропущено.","error")
-            else:
-                flash("В теме письма не найден SkyMail адрес.","error")
-            new_messages.append(msg)
-    for m in new_messages:
-        data["messages"].remove(m)
-    save_data(data)
-    return redirect(url_for("inbox"))
-
 @app.route("/files/<filename>")
 def uploaded_file(filename):
-    return send_from_directory(FILES_DIR,filename)
+    return send_from_directory(FILES_DIR,os.path.basename(filename))
 
 @app.route("/logout")
 def logout():
