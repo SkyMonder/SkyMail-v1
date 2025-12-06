@@ -1,5 +1,5 @@
 from flask import Flask, request, redirect, url_for, flash, session, send_from_directory, render_template_string
-import os, json, hashlib, shutil, re
+import os, json, hashlib, re
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -7,7 +7,7 @@ app.secret_key = "supersecretkey"
 
 DATA_FILE = "skymail_data.json"
 FILES_DIR = "files"
-ALLOWED_EXTENSIONS = {"txt", "pdf", "png", "jpg", "jpeg", "gif"}
+ALLOWED_EXTENSIONS = {"txt","pdf","png","jpg","jpeg","gif"}
 os.makedirs(FILES_DIR, exist_ok=True)
 
 # ================== Данные ==================
@@ -72,9 +72,9 @@ inbox_html = """
     <p style="color:{% if category=='error' %}red{% else %}green{% endif %}">{{ message }}</p>
   {% endfor %}
 {% endwith %}
-{% for i,msg in enumerate(messages_list,1) %}
+{% for msg in messages_list %}
 <hr>
-<p><b>{{i}}. От:</b> {{msg['from']}} | <b>Тема:</b> {{msg['subject']}}</p>
+<p><b>{{ loop.index }}. От:</b> {{msg['from']}} | <b>Тема:</b> {{msg['subject']}}</p>
 <p>{{msg['body']}}</p>
 {% if msg.get('files') %}
 <p>Файлы: 
@@ -223,5 +223,3 @@ def logout():
 if __name__=="__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
-
-
