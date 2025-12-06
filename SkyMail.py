@@ -2,16 +2,24 @@ import os
 import json
 import imaplib
 import email
-from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory
+from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory, session
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+from flask_session import Session
 
 # --- Настройка Flask ---
 app = Flask(__name__)
+app.secret_key = "supersecretkey"
+app.config["SESSION_TYPE"] = "filesystem"
+Session(app)
+
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# --- Хранилище данных ---
 DATA_FILE = "data.json"
-
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -25,10 +33,11 @@ def save_data():
 def next_id():
     return str(max([int(i) for u in data.values() for i in u.get("inbox", [])]+[0])+1)
 
-# --- Функция забора внешней почты через Yandex ---
+# --- Настройка Yandex ---
 YANDEX_EMAIL = "skymonder@yandex.ru"
 YANDEX_PASSWORD = "ВАШ_ПАРОЛЬ_ПРИЛОЖЕНИЯ"
 
+# --- Функция забора внешней почты через Yandex IMAP ---
 def fetch_external_mail():
     try:
         imap = imaplib.IMAP4_SSL("imap.yandex.com")
@@ -59,7 +68,7 @@ def fetch_external_mail():
             else:
                 body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
 
-            # --- Распределение по пользователям ---
+            # --- Распределение по пользователям SkyMail ---
             if subject.lower().startswith("to:"):
                 target_user = subject.split(":", 1)[1].strip()
                 if target_user in data:
@@ -77,26 +86,77 @@ def fetch_external_mail():
     except Exception as e:
         print(f"IMAP bridge error: {e}")
 
-# --- Flask маршруты ---
+# --- Функция отправки внешних писем через Yandex SMTP ---
+def send_external_email(sender, to_email, subject, body, attachments=None):
+    msg = MIMEMultipart()
+    msg['From'] = sender
+    msg['To'] = to_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+
+    if attachments:
+        for file in attachments:
+            filepath = os.path.join(UPLOAD_FOLDER, file)
+            part = MIMEBase('application', 'octet-stream')
+            with open(filepath, 'rb') as f:
+                part.set_payload(f.read())
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', f'attachment; filename={file}')
+            msg.attach(part)
+
+    try:
+        server = smtplib.SMTP_SSL('smtp.yandex.com', 465)
+        server.login(YANDEX_EMAIL, YANDEX_PASSWORD)
+        server.sendmail(sender, to_email, msg.as_string())
+        server.quit()
+        print(f"Письмо отправлено на {to_email}")
+        return True
+    except Exception as e:
+        print(f"Ошибка при отправке: {e}")
+        return False
+
+# --- HTML layout ---
 layout = """
 <!doctype html>
 <title>SkyMail</title>
 <h1>SkyMail</h1>
 <nav>
-  <a href="{{ url_for('index') }}">Входящие</a> |
-  <a href="{{ url_for('compose') }}">Написать письмо</a> |
-  <a href="{{ url_for('logout') }}">Выйти</a>
+  {% if session.get('user') %}
+    <a href="{{ url_for('index') }}">Входящие</a> |
+    <a href="{{ url_for('compose') }}">Написать письмо</a> |
+    <a href="{{ url_for('logout') }}">Выйти</a>
+  {% endif %}
 </nav>
 <hr>
 {% block content %}{% endblock %}
 """
 
+# --- Маршрут логина ---
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username")
+        if username not in data:
+            return "Пользователь не найден!"
+        session['user'] = username
+        return redirect(url_for("index"))
+    return render_template_string(layout + """
+{% block content %}
+<h2>Вход в SkyMail</h2>
+<form method="post">
+Введите имя пользователя: <input name="username">
+<input type="submit" value="Войти">
+</form>
+{% endblock %}
+""")
+
+# --- Входящие ---
 @app.route("/", methods=["GET"])
 def index():
-    fetch_external_mail()  # забираем внешние письма при каждом заходе
-    username = request.args.get("user")
-    if not username or username not in data:
-        return "Пользователь не найден!"
+    if 'user' not in session:
+        return redirect(url_for("login"))
+    fetch_external_mail()
+    username = session['user']
     inbox = data[username].get("inbox", [])
     return render_template_string(layout + """
 {% block content %}
@@ -119,10 +179,14 @@ def index():
 {% endblock %}
 """, username=username, inbox=inbox)
 
+# --- Написать письмо ---
 @app.route("/compose", methods=["GET", "POST"])
 def compose():
+    if 'user' not in session:
+        return redirect(url_for("login"))
+
     if request.method == "POST":
-        sender = request.form.get("sender")
+        sender = session['user']
         recipient = request.form.get("recipient")
         subject = request.form.get("subject")
         body = request.form.get("body")
@@ -134,26 +198,28 @@ def compose():
             file.save(filepath)
             attachments.append(file.filename)
 
-        if recipient not in data:
-            return "Пользователь не найден!"
+        if "@" in recipient:  # внешний email
+            send_external_email(sender, recipient, subject, body, attachments)
+        else:  # внутренний пользователь SkyMail
+            if recipient not in data:
+                return "Пользователь не найден!"
+            mid = next_id()
+            data[recipient].setdefault("inbox", []).append({
+                "id": mid,
+                "from": sender,
+                "subject": subject,
+                "body": body,
+                "attachments": attachments,
+                "unread": True
+            })
+            save_data()
 
-        mid = next_id()
-        data[recipient].setdefault("inbox", []).append({
-            "id": mid,
-            "from": sender,
-            "subject": subject,
-            "body": body,
-            "attachments": attachments,
-            "unread": True
-        })
-        save_data()
-        return redirect(url_for("index", user=sender))
+        return redirect(url_for("index"))
 
     return render_template_string(layout + """
 {% block content %}
 <h2>Написать письмо</h2>
 <form method="post" enctype="multipart/form-data">
-От: <input type="text" name="sender"><br>
 Кому: <input type="text" name="recipient"><br>
 Тема: <input type="text" name="subject"><br>
 Текст: <br><textarea name="body"></textarea><br>
@@ -163,13 +229,16 @@ def compose():
 {% endblock %}
 """)
 
+# --- Скачивание вложений ---
 @app.route("/uploads/<filename>")
 def download_file(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
+# --- Выход ---
 @app.route("/logout")
 def logout():
-    return "Вы вышли!"
+    session.pop('user', None)
+    return redirect(url_for("login"))
 
 # --- Регистрация тестовых пользователей ---
 data.setdefault("user1", {"inbox":[]})
