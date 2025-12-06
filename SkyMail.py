@@ -1,5 +1,5 @@
 from flask import Flask, request, redirect, url_for, flash, session, send_from_directory, render_template_string
-import os, json, hashlib, re, smtplib, threading, time
+import os, json, hashlib, re, smtplib, threading
 from werkzeug.utils import secure_filename
 from email.message import EmailMessage
 
@@ -28,10 +28,10 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".",1)[1].lower() in ALLOWED_EXTENSIONS
 
 # ================== SMTP ==================
-SMTP_SERVER = "smtp.gmail.com"  # Или smtp.mail.ru и т.д.
+SMTP_SERVER = "smtp.gmail.com"  # или smtp.mail.ru
 SMTP_PORT = 465
-SMTP_USER = "your_email@gmail.com"   # Адрес отправителя
-SMTP_PASS = "your_app_password"      # Пароль приложения Gmail
+SMTP_USER = "your_email@gmail.com"  # ваш email
+SMTP_PASS = "your_app_password"     # пароль приложения Gmail
 
 def send_external_email(to_email, subject, body, attachments=[]):
     try:
@@ -56,12 +56,35 @@ def send_external_email(to_email, subject, body, attachments=[]):
         print(f"[SMTP] Ошибка при отправке: {e}")
         return False
 
-# ================== HTML ==================
+def send_email_background(to_email, subject, body, attachments):
+    threading.Thread(target=send_external_email, args=(to_email, subject, body, attachments), daemon=True).start()
+
+# ================== Шаблоны с дизайном ==================
+base_css = """
+<style>
+body{font-family:Arial,sans-serif; background:#f5f5f5; padding:20px;}
+.container{max-width:700px;margin:auto;background:white;padding:20px;border-radius:10px;box-shadow:0 0 10px rgba(0,0,0,0.1);}
+h2{color:#333;text-align:center;}
+input,textarea{width:100%;padding:8px;margin:5px 0;border:1px solid #ccc;border-radius:5px;}
+input[type=submit]{background:#4CAF50;color:white;border:none;cursor:pointer;}
+input[type=submit]:hover{background:#45a049;}
+a{color:#4CAF50;text-decoration:none;}
+a:hover{text-decoration:underline;}
+.flash{padding:10px;border-radius:5px;margin-bottom:10px;}
+.flash.success{background:#d4edda;color:#155724;}
+.flash.error{background:#f8d7da;color:#721c24;}
+hr{border:0;border-top:1px solid #eee;}
+</style>
+"""
+
+def render_with_css(html):
+    return base_css + f"<div class='container'>{html}</div>"
+
 login_html = """
 <h2>SkyMail - Вход</h2>
 {% with messages = get_flashed_messages(with_categories=true) %}
   {% for category, message in messages %}
-    <p style="color:{% if category=='error' %}red{% else %}green{% endif %}">{{ message }}</p>
+    <div class="flash {{category}}">{{ message }}</div>
   {% endfor %}
 {% endwith %}
 <form method="post">
@@ -99,7 +122,7 @@ inbox_html = """
 <p><a href="{{ url_for('send') }}">Написать сообщение</a> | <a href="{{ url_for('logout') }}">Выход</a></p>
 {% with messages = get_flashed_messages(with_categories=true) %}
   {% for category,message in messages %}
-    <p style="color:{% if category=='error' %}red{% else %}green{% endif %}">{{ message }}</p>
+    <div class="flash {{category}}">{{ message }}</div>
   {% endfor %}
 {% endwith %}
 {% for msg in messages_list %}
@@ -109,7 +132,7 @@ inbox_html = """
 {% if msg.get('files') %}
 <p>Файлы: 
 {% for f in msg['files'] %}
-<a href="{{ url_for('uploaded_file', filename=f) }}">{{ f }}</a>
+<a href="{{ url_for('uploaded_file', filename=f) }}">{{ f.split('/')[-1] }}</a>
 {% endfor %}
 </p>
 {% endif %}
@@ -121,7 +144,7 @@ send_html = """
 <form method="post" enctype="multipart/form-data">
 Получатель: <input type="text" name="recipient"><br>
 Тема: <input type="text" name="subject"><br>
-Сообщение:<br><textarea name="body" rows="5" cols="50"></textarea><br>
+Сообщение:<br><textarea name="body" rows="5"></textarea><br>
 Прикрепить файлы: <input type="file" name="files" multiple><br>
 <input type="submit" value="Отправить">
 </form>
@@ -140,7 +163,7 @@ def login():
             session["user"]=email
             return redirect(url_for("inbox"))
         flash("Неверный логин или пароль!","error")
-    return render_template_string(login_html)
+    return render_with_css(render_template_string(login_html))
 
 @app.route("/register", methods=["GET","POST"])
 def register():
@@ -157,7 +180,7 @@ def register():
         save_data(data)
         flash("Аккаунт создан! Войдите в систему.","success")
         return redirect(url_for("login"))
-    return render_template_string(register_html)
+    return render_with_css(render_template_string(register_html))
 
 @app.route("/recover", methods=["GET","POST"])
 def recover():
@@ -175,7 +198,7 @@ def recover():
             save_data(data)
             flash("Пароль изменён!","success")
             return redirect(url_for("login"))
-    return render_template_string(recover_html)
+    return render_with_css(render_template_string(recover_html))
 
 @app.route("/send", methods=["GET","POST"])
 def send():
@@ -191,22 +214,20 @@ def send():
         for file in uploaded_files:
             if file and allowed_file(file.filename):
                 filename=secure_filename(f"{sender.replace('@','_')}_{file.filename}")
-                file.save(os.path.join(FILES_DIR,filename))
-                files_list.append(os.path.join(FILES_DIR,filename))
+                path = os.path.join(FILES_DIR,filename)
+                file.save(path)
+                files_list.append(path)
         data=load_data()
-        # Внутренний SkyMail
         if recipient.endswith("@skymail.ru") and recipient in data["users"]:
             data["messages"].append({"from":sender,"to":recipient,"subject":subject,"body":body,"files":files_list})
             flash("Сообщение отправлено внутреннему пользователю!","success")
         else:
-            # Отправка реальному внешнему почтовому ящику через SMTP
-            if send_external_email(recipient, subject, body, files_list):
-                flash(f"Сообщение успешно отправлено на {recipient} через SMTP!","success")
-            else:
-                flash(f"Не удалось отправить письмо на {recipient}.","error")
+            # Отправка внешнему пользователю через SMTP в фоне
+            send_email_background(recipient, subject, body, files_list)
+            flash(f"Сообщение отправляется на {recipient} через SMTP!","success")
         save_data(data)
         return redirect(url_for("inbox"))
-    return render_template_string(send_html)
+    return render_with_css(render_template_string(send_html))
 
 @app.route("/inbox")
 def inbox():
@@ -215,7 +236,7 @@ def inbox():
     data=load_data()
     user=session["user"]
     messages_list=[m for m in data["messages"] if m["to"]==user]
-    return render_template_string(inbox_html,messages_list=messages_list,user=user)
+    return render_with_css(render_template_string(inbox_html,messages_list=messages_list,user=user))
 
 @app.route("/files/<filename>")
 def uploaded_file(filename):
