@@ -48,7 +48,7 @@ def fetch_external_mail():
                 for part in msg.walk():
                     content_disposition = part.get("Content-Disposition")
                     if part.get_content_type() == "text/plain" and not content_disposition:
-                        body += part.get_payload(decode=True).decode(errors="ignore")
+                        body += part.get_payload(decode=True).decode('utf-8', errors='ignore')
                     elif content_disposition and "attachment" in content_disposition:
                         filename = part.get_filename()
                         if filename:
@@ -57,7 +57,7 @@ def fetch_external_mail():
                                 f.write(part.get_payload(decode=True))
                             attachments.append(filename)
             else:
-                body = msg.get_payload(decode=True).decode(errors="ignore")
+                body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
 
             # --- Распределение по пользователям ---
             if subject.lower().startswith("to:"):
