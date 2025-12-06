@@ -1,228 +1,154 @@
-from flask import Flask, request, redirect, session, render_template_string, send_file
-import sqlite3, os, smtplib, ssl
-from email.message import EmailMessage
-from werkzeug.security import generate_password_hash, check_password_hash
+import json
+import bcrypt
+import uuid
+import os
+import requests
 
-app = Flask(__name__)
-app.secret_key = "skymail_secret"
+# --- Mailgun настройки ---
+MAILGUN_API_KEY = "ff202a3964dde38788c732fff98c4a3d-235e4bb2-6a352b7b"
+MAILGUN_DOMAIN = "sandbox8ea8e4589e764a13ae5c03789d105bca.mailgun.org"
+MAILGUN_FROM = f"SkyMail <skymonder@{MAILGUN_DOMAIN}>"
 
-SMTP_SERVER = "smtp.yandex.ru"
-SMTP_PORT = 465
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASS = os.getenv("SMTP_PASS")
+# --- Файлы хранения данных ---
+USERS_FILE = "users.json"
+TOKENS_FILE = "tokens.json"
 
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# --- Инициализация файлов ---
+if not os.path.exists(USERS_FILE):
+    with open(USERS_FILE, "w") as f:
+        json.dump({}, f)
 
-# ---- БАЗА ----
-def db():
-    return sqlite3.connect("skymail.db", check_same_thread=False)
+if not os.path.exists(TOKENS_FILE):
+    with open(TOKENS_FILE, "w") as f:
+        json.dump({}, f)
 
-with db() as con:
-    c = con.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT UNIQUE,
-        password TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sender TEXT,
-        receiver TEXT,
-        subject TEXT,
-        body TEXT,
-        file TEXT
-    )""")
+# --- Вспомогательные функции ---
+def load_json(file):
+    with open(file, "r") as f:
+        return json.load(f)
 
-# ---- ГЛАВНАЯ ----
-@app.route("/")
-def index():
-    if "user" not in session:
-        return redirect("/login")
-    return redirect("/inbox")
+def save_json(file, data):
+    with open(file, "w") as f:
+        json.dump(data, f, indent=2)
 
-# ---- РЕГИСТРАЦИЯ ----
-@app.route("/register", methods=["GET", "POST"])
-def register():
-    if request.method == "POST":
-        user = request.form["email"]
-        password = generate_password_hash(request.form["password"])
+def hash_password(password):
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-        if not user.endswith("@skymail.ru"):
-            return "Разрешены только @skymail.ru"
+def check_password(password, hashed):
+    return bcrypt.checkpw(password.encode(), hashed.encode())
 
-        try:
-            with db() as con:
-                con.cursor().execute("INSERT INTO users (email,password) VALUES (?,?)", (user, password))
-            return redirect("/login")
-        except:
-            return "Такой пользователь уже существует"
+# --- Регистрация пользователя ---
+def register(username, password):
+    users = load_json(USERS_FILE)
+    if username in users:
+        print("Пользователь уже существует.")
+        return
+    hashed = hash_password(password)
+    users[username] = {
+        "password": hashed,
+        "email": f"{username}@skymail.ru",
+        "inbox": []
+    }
+    save_json(USERS_FILE, users)
+    print(f"Аккаунт создан: {username}@skymail.ru")
 
-    return render_template_string(TEMPLATE_REGISTER)
+# --- Аутентификация ---
+def login(username, password):
+    users = load_json(USERS_FILE)
+    if username not in users:
+        print("Пользователь не найден.")
+        return False
+    if not check_password(password, users[username]["password"]):
+        print("Неверный пароль.")
+        return False
+    print(f"Привет, {username}!")
+    return True
 
-# ---- ВХОД ----
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        user = request.form["email"]
-        password = request.form["password"]
+# --- Внутренняя почта ---
+def send_internal(from_user, to_user, subject, text):
+    users = load_json(USERS_FILE)
+    if from_user not in users or to_user not in users:
+        print("Пользователь не найден.")
+        return
+    users[to_user]["inbox"].append({
+        "from": users[from_user]["email"],
+        "subject": subject,
+        "text": text
+    })
+    save_json(USERS_FILE, users)
+    print("Сообщение доставлено во внутренний ящик.")
 
-        with db() as con:
-            c = con.cursor()
-            c.execute("SELECT password FROM users WHERE email=?", (user,))
-            data = c.fetchone()
+def inbox(username):
+    users = load_json(USERS_FILE)
+    if username not in users:
+        print("Пользователь не найден.")
+        return
+    mails = users[username]["inbox"]
+    if not mails:
+        print("Входящие пусты.")
+        return
+    for i, mail in enumerate(mails, 1):
+        print(f"{i}. От: {mail['from']}, Тема: {mail['subject']}\n{mail['text']}\n")
 
-        if data and check_password_hash(data[0], password):
-            session["user"] = user
-            return redirect("/inbox")
-
-        return "Неверный логин или пароль"
-
-    return render_template_string(TEMPLATE_LOGIN)
-
-# ---- ВЫХОД ----
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect("/login")
-
-# ---- ВХОДЯЩИЕ ----
-@app.route("/inbox")
-def inbox():
-    if "user" not in session:
-        return redirect("/login")
-
-    with db() as con:
-        c = con.cursor()
-        c.execute("SELECT sender,subject,body,file FROM messages WHERE receiver=?", (session["user"],))
-        messages = c.fetchall()
-
-    return render_template_string(TEMPLATE_INBOX, messages=messages, user=session["user"])
-
-# ---- ФАЙЛ ----
-@app.route("/file/<name>")
-def file(name):
-    return send_file(os.path.join(UPLOAD_FOLDER, name), as_attachment=True)
-
-# ---- ОТПРАВКА ----
-@app.route("/send", methods=["POST"])
-def send():
-    sender = session["user"]
-    receiver = request.form["to"]
-    subject = request.form["subject"]
-    body = request.form["body"]
-
-    file = request.files.get("file")
-    filename = ""
-
-    if file and file.filename:
-        filename = file.filename
-        file.save(os.path.join(UPLOAD_FOLDER, filename))
-
-    # ВНУТРИ SKYMAIL
-    if receiver.endswith("@skymail.ru"):
-        with db() as con:
-            con.cursor().execute(
-                "INSERT INTO messages (sender,receiver,subject,body,file) VALUES (?,?,?,?,?)",
-                (sender, receiver, subject, body, filename)
-            )
-
-    # ВНЕШНЯЯ ОТПРАВКА
+# --- Внешняя почта через Mailgun ---
+def send_external(to_email, subject, text, sender_sky):
+    full_text = f"{text}\n\n---\nОтправлено с помощью SkyMail от: {sender_sky}"
+    response = requests.post(
+        f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages",
+        auth=("api", MAILGUN_API_KEY),
+        data={
+            "from": MAILGUN_FROM,
+            "to": to_email,
+            "subject": subject,
+            "text": full_text
+        }
+    )
+    if response.status_code == 200:
+        print("Письмо успешно отправлено через Mailgun!")
     else:
-        msg = EmailMessage()
-        msg["From"] = SMTP_USER
-        msg["To"] = receiver
-        msg["Subject"] = f"[SkyMail] {subject}"
+        print("Ошибка при отправке:", response.text)
 
-        msg.set_content(f"""
-От: {sender}
-Кому: {receiver}
+# --- Восстановление пароля ---
+def request_password_reset(username):
+    users = load_json(USERS_FILE)
+    tokens = load_json(TOKENS_FILE)
+    if username not in users:
+        print("Пользователь не найден.")
+        return
+    token = str(uuid.uuid4())
+    tokens[token] = username
+    save_json(TOKENS_FILE, tokens)
+    send_external(users[username]["email"], "Сброс пароля",
+                  f"Используйте этот токен для сброса: {token}", "SkyMail")
+    print("Письмо с токеном отправлено на ваш email.")
 
-{body}
-""")
+def reset_password(token, new_password):
+    tokens = load_json(TOKENS_FILE)
+    if token not in tokens:
+        print("Неверный токен.")
+        return
+    username = tokens.pop(token)
+    save_json(TOKENS_FILE, tokens)
+    users = load_json(USERS_FILE)
+    users[username]["password"] = hash_password(new_password)
+    save_json(USERS_FILE, users)
+    print(f"Пароль для {username} успешно изменён.")
 
-        if filename:
-            with open(os.path.join(UPLOAD_FOLDER, filename), "rb") as f:
-                msg.add_attachment(f.read(), maintype="application", subtype="octet-stream", filename=filename)
-
-        try:
-            context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=10, context=context) as smtp:
-                smtp.login(SMTP_USER, SMTP_PASS)
-                smtp.send_message(msg)
-            print("✅ Отправлено через Яндекс")
-        except Exception as e:
-            print("❌ SMTP ОШИБКА:", e)
-            return f"Ошибка SMTP: {e}"
-
-    return redirect("/inbox")
-
-# ---- ДИЗАЙН ----
-STYLE = """
-<style>
-body { background:#0f172a; color:white; font-family:Arial; }
-.box { width:380px; margin:70px auto; background:#020617; padding:25px; border-radius:12px; box-shadow:0 0 20px black }
-input,textarea { width:100%; padding:10px; margin:5px 0; background:#020617; color:white; border:1px solid #334155; border-radius:6px }
-button { width:100%; padding:12px; background:#2563eb; color:white; border:none; border-radius:6px; cursor:pointer }
-button:hover { background:#1d4ed8 }
-hr { border:1px solid #1e293b }
-a { color:#60a5fa }
-.msg { background:#020617; padding:10px; border-radius:8px; margin-top:10px }
-</style>
-"""
-
-TEMPLATE_REGISTER = STYLE + """
-<div class="box">
-<h2>Регистрация SkyMail</h2>
-<form method=post>
-<input name=email placeholder="user@skymail.ru" required>
-<input type=password name=password placeholder="Пароль" required>
-<button>Создать</button>
-</form>
-<a href="/login">Войти</a>
-</div>
-"""
-
-TEMPLATE_LOGIN = STYLE + """
-<div class="box">
-<h2>Вход SkyMail</h2>
-<form method=post>
-<input name=email required>
-<input type=password name=password required>
-<button>Войти</button>
-</form>
-<a href="/register">Регистрация</a>
-</div>
-"""
-
-TEMPLATE_INBOX = STYLE + """
-<div class="box">
-<h2>{{ user }}</h2>
-<a href="/logout">Выйти</a>
-
-<h3>Отправка</h3>
-<form method=post action="/send" enctype=multipart/form-data>
-<input name=to placeholder="Кому" required>
-<input name=subject placeholder="Тема" required>
-<textarea name=body placeholder="Сообщение" required></textarea>
-<input type=file name=file>
-<button>Отправить</button>
-</form>
-
-<h3>Входящие</h3>
-{% for m in messages %}
-<div class="msg">
-<b>От:</b> {{ m[0] }}<br>
-<b>Тема:</b> {{ m[1] }}<br>
-{{ m[2] }}<br>
-{% if m[3] %}
-<a href="/file/{{ m[3] }}">Скачать файл</a>
-{% endif %}
-</div>
-{% endfor %}
-</div>
-"""
-
-# ---- ЗАПУСК ----
+# --- Пример использования ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    # Регистрируем пользователей
+    register("alice", "password123")
+    register("bob", "securepass")
+
+    # Отправляем внутреннее сообщение
+    send_internal("alice", "bob", "Привет", "Это тестовое сообщение внутри SkyMail!")
+
+    # Просмотр входящих
+    inbox("bob")
+
+    # Отправляем внешнее письмо через Mailgun
+    # send_external("example@gmail.com", "Тема письма", "Текст письма", "alice@skymail.ru")
+
+    # Восстановление пароля (пример)
+    # request_password_reset("bob")
+    # reset_password("PASTE_YOUR_TOKEN_HERE", "newpassword")
