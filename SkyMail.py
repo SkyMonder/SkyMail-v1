@@ -14,7 +14,7 @@ SMTP_PASS = os.getenv("SMTP_PASS")
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ---------- БД ----------
+# ---- БАЗА ----
 def db():
     return sqlite3.connect("skymail.db", check_same_thread=False)
 
@@ -34,14 +34,14 @@ with db() as con:
         file TEXT
     )""")
 
-# ---------- ГЛАВНАЯ ----------
+# ---- ГЛАВНАЯ ----
 @app.route("/")
 def index():
     if "user" not in session:
         return redirect("/login")
     return redirect("/inbox")
 
-# ---------- РЕГИСТРАЦИЯ ----------
+# ---- РЕГИСТРАЦИЯ ----
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
@@ -49,18 +49,18 @@ def register():
         password = generate_password_hash(request.form["password"])
 
         if not user.endswith("@skymail.ru"):
-            return "Только @skymail.ru!"
+            return "Разрешены только @skymail.ru"
 
         try:
             with db() as con:
                 con.cursor().execute("INSERT INTO users (email,password) VALUES (?,?)", (user, password))
             return redirect("/login")
         except:
-            return "Пользователь уже существует"
+            return "Такой пользователь уже существует"
 
     return render_template_string(TEMPLATE_REGISTER)
 
-# ---------- ВХОД ----------
+# ---- ВХОД ----
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
@@ -76,17 +76,17 @@ def login():
             session["user"] = user
             return redirect("/inbox")
 
-        return "Неверные данные"
+        return "Неверный логин или пароль"
 
     return render_template_string(TEMPLATE_LOGIN)
 
-# ---------- ВЫХОД ----------
+# ---- ВЫХОД ----
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect("/login")
 
-# ---------- ВХОДЯЩИЕ ----------
+# ---- ВХОДЯЩИЕ ----
 @app.route("/inbox")
 def inbox():
     if "user" not in session:
@@ -99,12 +99,12 @@ def inbox():
 
     return render_template_string(TEMPLATE_INBOX, messages=messages, user=session["user"])
 
-# ---------- СКАЧИВАНИЕ ФАЙЛА ----------
+# ---- ФАЙЛ ----
 @app.route("/file/<name>")
 def file(name):
     return send_file(os.path.join(UPLOAD_FOLDER, name), as_attachment=True)
 
-# ---------- ОТПРАВКА ----------
+# ---- ОТПРАВКА ----
 @app.route("/send", methods=["POST"])
 def send():
     sender = session["user"]
@@ -115,11 +115,11 @@ def send():
     file = request.files.get("file")
     filename = ""
 
-    if file:
+    if file and file.filename:
         filename = file.filename
         file.save(os.path.join(UPLOAD_FOLDER, filename))
 
-    # ВНУТРЬ SKYMAIL
+    # ВНУТРИ SKYMAIL
     if receiver.endswith("@skymail.ru"):
         with db() as con:
             con.cursor().execute(
@@ -127,20 +127,19 @@ def send():
                 (sender, receiver, subject, body, filename)
             )
 
-    # ВНЕШНЯЯ ПОЧТА ЧЕРЕЗ ЯНДЕКС
+    # ВНЕШНЯЯ ОТПРАВКА
     else:
         msg = EmailMessage()
-        msg["From"] = SMTP_USER   # ✅ ВАЖНО!!!
+        msg["From"] = SMTP_USER
         msg["To"] = receiver
         msg["Subject"] = f"[SkyMail] {subject}"
 
-        full_body = f"""
+        msg.set_content(f"""
 От: {sender}
 Кому: {receiver}
 
 {body}
-"""
-        msg.set_content(full_body)
+""")
 
         if filename:
             with open(os.path.join(UPLOAD_FOLDER, filename), "rb") as f:
@@ -148,61 +147,82 @@ def send():
 
         try:
             context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, context=context) as smtp:
+            with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=10, context=context) as smtp:
                 smtp.login(SMTP_USER, SMTP_PASS)
                 smtp.send_message(msg)
             print("✅ Отправлено через Яндекс")
         except Exception as e:
-            print("❌ SMTP ошибка:", e)
+            print("❌ SMTP ОШИБКА:", e)
             return f"Ошибка SMTP: {e}"
 
     return redirect("/inbox")
 
-# ---------- ШАБЛОНЫ ----------
-TEMPLATE_REGISTER = """
+# ---- ДИЗАЙН ----
+STYLE = """
+<style>
+body { background:#0f172a; color:white; font-family:Arial; }
+.box { width:380px; margin:70px auto; background:#020617; padding:25px; border-radius:12px; box-shadow:0 0 20px black }
+input,textarea { width:100%; padding:10px; margin:5px 0; background:#020617; color:white; border:1px solid #334155; border-radius:6px }
+button { width:100%; padding:12px; background:#2563eb; color:white; border:none; border-radius:6px; cursor:pointer }
+button:hover { background:#1d4ed8 }
+hr { border:1px solid #1e293b }
+a { color:#60a5fa }
+.msg { background:#020617; padding:10px; border-radius:8px; margin-top:10px }
+</style>
+"""
+
+TEMPLATE_REGISTER = STYLE + """
+<div class="box">
 <h2>Регистрация SkyMail</h2>
 <form method=post>
-<input name=email placeholder="user@skymail.ru"><br>
-<input type=password name=password placeholder="Пароль"><br>
+<input name=email placeholder="user@skymail.ru" required>
+<input type=password name=password placeholder="Пароль" required>
 <button>Создать</button>
 </form>
 <a href="/login">Войти</a>
+</div>
 """
 
-TEMPLATE_LOGIN = """
+TEMPLATE_LOGIN = STYLE + """
+<div class="box">
 <h2>Вход SkyMail</h2>
 <form method=post>
-<input name=email><br>
-<input type=password name=password><br>
+<input name=email required>
+<input type=password name=password required>
 <button>Войти</button>
 </form>
+<a href="/register">Регистрация</a>
+</div>
 """
 
-TEMPLATE_INBOX = """
-<h2>SkyMail — {{ user }}</h2>
+TEMPLATE_INBOX = STYLE + """
+<div class="box">
+<h2>{{ user }}</h2>
 <a href="/logout">Выйти</a>
 
-<h3>Отправить письмо</h3>
+<h3>Отправка</h3>
 <form method=post action="/send" enctype=multipart/form-data>
-<input name=to placeholder="Кому"><br>
-<input name=subject placeholder="Тема"><br>
-<textarea name=body placeholder="Сообщение"></textarea><br>
-<input type=file name=file><br>
+<input name=to placeholder="Кому" required>
+<input name=subject placeholder="Тема" required>
+<textarea name=body placeholder="Сообщение" required></textarea>
+<input type=file name=file>
 <button>Отправить</button>
 </form>
 
 <h3>Входящие</h3>
 {% for m in messages %}
-<hr>
+<div class="msg">
 <b>От:</b> {{ m[0] }}<br>
 <b>Тема:</b> {{ m[1] }}<br>
 {{ m[2] }}<br>
 {% if m[3] %}
 <a href="/file/{{ m[3] }}">Скачать файл</a>
 {% endif %}
+</div>
 {% endfor %}
+</div>
 """
 
-# ---------- ЗАПУСК ----------
+# ---- ЗАПУСК ----
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
